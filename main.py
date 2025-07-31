@@ -9,7 +9,9 @@ from utils.llm_gemini import ask_question
 from utils.formatter import format_response
 
 app = FastAPI()
-
+@app.get("/")
+def home():
+    return {"status": "ok"}
 class QueryRequest(BaseModel):
     documents: str  # URL to the document
     questions: List[str]
