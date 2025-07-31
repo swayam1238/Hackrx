@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: my-fastapi-app           # Change this to your app's name
+    name: Hackrx-1        # Change this to your app's name
     env: python
     plan: free
     region: oregon                 # Or your preferred region
