@@ -7,3 +7,4 @@ faiss-cpu
 google-generativeai
 python-multipart
 requests
+pypdf2
