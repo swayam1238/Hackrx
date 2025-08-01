@@ -9,14 +9,18 @@ from utils.llm_gemini import ask_question
 from utils.formatter import format_response
 
 app = FastAPI()
+
+# This still handles GET requests for a basic status check
 @app.get("/")
 def home():
     return {"status": "ok"}
+
 class QueryRequest(BaseModel):
     documents: str  # URL to the document
     questions: List[str]
 
-@app.post("/hackrx/run")
+# MINIMAL CHANGE HERE: The path is now "/" instead of "/hackrx/run"
+@app.post("/")
 async def run_query(
     request: Request,
     body: QueryRequest,
