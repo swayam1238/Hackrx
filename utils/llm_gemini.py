@@ -1,92 +1,114 @@
-import os
-from openai import OpenAI
-from dotenv import load_dotenv
+import re
+import google.generativeai as genai
 
-load_dotenv()
+# --- Configuration ---
+# WARNING: Hardcoding API keys is a major security risk. 
+# It's highly recommended to use environment variables instead.
+genai.configure(api_key="AIzaSyDg6eoWSyMxwzycFHbnGRll9xRP_777PyY")
 
-# Groq-compatible OpenAI client
-client = OpenAI(
-    base_url="https://api.groq.com/openai/v1",
-    api_key="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"
+# The best model for this reasoning task is Gemini 1.5 Pro.
+#MODEL_NAME = "gemini-1.5-pro-latest"
+# For a faster, more economical option, use Gemini 1.5 Flash.
+MODEL_NAME = "gemini-1.5-flash-latest"
+
+# Configure the model generation parameters
+generation_config = {
+    "temperature": 0.1,
+    "top_p": 0.9,
+    "max_output_tokens": 1024,
+}
+
+# Initialize the Gemini model
+model = genai.GenerativeModel(
+    model_name=MODEL_NAME,
+    generation_config=generation_config
 )
 
-MODEL_NAME = "llama3-70b-8192"  # or try mixtral-8x7b-32768 for Mixture of Experts
 
-def ask_question(question, top_chunks):
-    # Adaptive chunk processing based on total content size
+def create_policy_prompt(question: str, retrieved_chunks: list[str]) -> str:
+    """
+    Creates a high-precision prompt for policy Q&A using the Chain-of-Thought method.
+    """
+    context_str = "\n".join(f"[{i+1}] {chunk}" for i, chunk in enumerate(retrieved_chunks))
+
+    # This prompt is well-structured for powerful models like Gemini 1.5 Pro
+    prompt = f"""You are a specialized AI assistant acting as a meticulous Insurance Policy Analyst.
+Your task is to analyze the provided policy clauses and answer the user's question with precision.
+
+<PolicyClauses>
+{context_str}
+</PolicyClauses>
+
+<Question>
+{question}
+</Question>
+
+Follow these instructions precisely:
+1.  First, inside a <thinking> block, break down your process. Identify key terms in the question. Scan the <PolicyClauses> to locate the exact text that addresses these terms. Extract the relevant facts and clause numbers.
+2.  After your thinking process, provide the final, concise answer directly, with no preamble.
+3.  Your answer must be derived *only* from the text in <PolicyClauses>.
+4.  If the information is not present, you must state that the answer is not available in the provided text.
+
+<thinking>
+(Your reasoning process to find the answer goes here)
+</thinking>
+
+(Your final, direct answer goes here)
+"""
+    return prompt
+
+def ask_question(question: str, top_chunks: list[str]):
+    """
+    Asks the question to the Gemini model and parses the structured response.
+    """
+    # --- Chunk Curation ---
     limited_chunks = []
     total_length = 0
-    max_chunk_length = 300  # Increased for better context
-    
-    # Calculate total available context
-    total_chunks_length = sum(len(chunk) for chunk in top_chunks)
-    
-    # Adaptive context limit based on content size
-    if total_chunks_length > 5000:  # Large content
-        context_limit = 2500
-    elif total_chunks_length > 2000:  # Medium content
-        context_limit = 2000
-    else:  # Small content
-        context_limit = 1500
-    
+    context_limit = 2500  # Simplified limit for clarity
+
     for chunk in top_chunks:
         if total_length + len(chunk) < context_limit:
-            # Use more of each chunk for large files
-            chunk_to_use = chunk[:max_chunk_length] if len(chunk) > max_chunk_length else chunk
-            limited_chunks.append(chunk_to_use)
-            total_length += len(chunk_to_use)
+            limited_chunks.append(chunk)
+            total_length += len(chunk)
         else:
             break
     
-    prompt = f"""Answer this question based on the provided policy clauses:
-
-Question: {question}
-
-Clauses:
-{chr(10).join(limited_chunks)}
-
-Provide a direct, concise answer. If information is not in the clauses, state "Not specified"."""
+    # --- Create the improved prompt ---
+    prompt = create_policy_prompt(question, limited_chunks)
 
     try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": "You are a policy analyst. Give direct, concise answers."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.0,  # More deterministic
-            max_tokens=400,   # Increased for better answers
-            timeout=45        # Increased timeout for large files
-        )
+        # --- Call the Gemini API ---
+        response = model.generate_content(prompt)
+
+        # Access the response text
+        raw_model_output = response.text.strip()
+
+        # --- Post-process the structured <thinking> output (This logic remains the same) ---
+        thinking_part = "No <thinking> block found."
+        final_answer = raw_model_output
+
+        if "</thinking>" in raw_model_output:
+            parts = raw_model_output.split("</thinking>")
+            thinking_match = re.search(r"<thinking>(.*?)</thinking>", raw_model_output, re.DOTALL)
+            if thinking_match:
+                thinking_part = thinking_match.group(1).strip()
+            
+            final_answer = parts[-1].strip()
+
+        # Extract clauses and determine confidence from the reasoning
+        relevant_clauses = re.findall(r'clause|section|\[\d+\]', thinking_part.lower())
+        confidence = "High" if relevant_clauses else "Medium"
         
-        response_text = response.choices[0].message.content.strip()
-        
-        # Extract reasoning and confidence from the response
-        reasoning = response_text
-        confidence = "High" if "clause" in response_text.lower() or "section" in response_text.lower() else "Medium"
-        
-        # Try to extract relevant clauses from the response
-        relevant_clauses = []
-        if "clause" in response_text.lower():
-            import re
-            clause_matches = re.findall(r'clause\s+\d+\.?\d*', response_text.lower())
-            relevant_clauses.extend(clause_matches)
-        if "section" in response_text.lower():
-            import re
-            section_matches = re.findall(r'section\s+\d+\.?\d*', response_text.lower())
-            relevant_clauses.extend(section_matches)
-        
-        # If no specific clauses found, provide a general reference
-        if not relevant_clauses:
-            relevant_clauses = ["Policy clauses"]
-        
+        # Clean up the list of clauses
+        found_clauses = list(set(re.findall(r'\[\d+\]', thinking_part))) or ["Not specified"]
+
         return (
-            response_text,
-            reasoning,
-            relevant_clauses,
+            final_answer,
+            thinking_part, # The reasoning from the model
+            found_clauses, # More precise clause extraction
             confidence
         )
-            
+
     except Exception as e:
         return (
             f"❌ Error generating answer: {str(e)}",

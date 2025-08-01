@@ -55,21 +55,26 @@ async def run_query(
     embeddings = get_embeddings(chunks)
     index = build_faiss_index(embeddings, cache_key=filename)
 
-    # Step 3: Process each question with explainability (optimized for large files)
-    answers = []
-    for question in body.questions:
+    # Step 3: Define parallel question processor
+    async def process_question(question: str):
         # Adaptive search based on document size
         document_size = len(raw_text)
-        if document_size > 100000:  # Large document
-            k = 4  # More chunks for large documents
-        elif document_size > 50000:  # Medium document
+        if document_size > 100000:
+            k = 4
+        elif document_size > 50000:
             k = 3
-        else:  # Small document
+        else:
             k = 2
             
-        top_chunks = search_similar_chunks(question, chunks, index, k=k)
-        answer, reasoning, relevant_clauses, confidence = ask_question(question, top_chunks)
-        formatted_answer = format_response(answer, reasoning, relevant_clauses, confidence)
-        answers.append(formatted_answer)
+        # Move CPU-bound tasks to thread pool executor
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor() as pool:
+            top_chunks = await loop.run_in_executor(pool, search_similar_chunks, question, chunks, index, k)
+            result = await loop.run_in_executor(pool, ask_question, question, top_chunks)
+            answer, reasoning, relevant_clauses, confidence = result
+            return format_response(answer, reasoning, relevant_clauses, confidence)
+
+    # Step 4: Run questions in parallel
+    answers = await asyncio.gather(*[process_question(q) for q in body.questions])
 
     return {"answers": answers}

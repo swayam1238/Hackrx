@@ -1,50 +1,89 @@
-from sentence_transformers import SentenceTransformer
-import faiss
-import numpy as np
-import pickle
-import os
-from typing import List, Tuple
 
-# Global model instance for reuse
-_model = None
+import numpy as np
+import faiss
+from typing import List
+import numpy.typing as npt
+import google.generativeai as genai
+
+# --- Configuration ---
+# WARNING: Hardcoding API keys is a major security risk. 
+# It's highly recommended to use environment variables instead.
+genai.configure(api_key="AIzaSyDg6eoWSyMxwzycFHbnGRll9xRP_777PyY")
+
+# The Gemini model for embeddings
+EMBEDDING_MODEL = "models/embedding-001"
+
+# The dimension of the embeddings produced by the model
+EMBEDDING_DIM = 768
+
 _index_cache = {}
 
-def get_model():
-    global _model
-    if _model is None:
-        _model = SentenceTransformer('all-MiniLM-L6-v2')
-    return _model
+def get_embeddings(chunks: List[str]) -> npt.NDArray:
+    """Get embeddings with caching to avoid reprocessing identical content."""
+    try:
+        # Build content signature to identify similar text
+        content_signature = ":".join([
+            f"{len(chunk)}:{hash(chunk)}" for chunk in chunks[:5]  # First 5 chunks for faster comparison
+        ])[:200]  # Keep short for efficiency
 
-# Get embeddings for each chunk with caching and adaptive batching
-def get_embeddings(chunks):
-    model = get_model()
-    # Adaptive batch size based on number of chunks
-    if len(chunks) > 100:  # Large document
-        batch_size = 64
-    elif len(chunks) > 50:  # Medium document
-        batch_size = 48
-    else:  # Small document
-        batch_size = 32
-    
-    return model.encode(chunks, show_progress_bar=False, batch_size=batch_size)
+        # Check cache first
+        if hasattr(get_embeddings, "_cache"):
+            if content_signature in get_embeddings._cache:
+                return get_embeddings._cache[content_signature]
 
-# Build FAISS index with caching
-def build_faiss_index(embeddings, cache_key=None):
+        # Get new embeddings
+        response = genai.embed_content(
+            model=EMBEDDING_MODEL,
+            content=chunks,
+            task_type="retrieval_document"
+        )
+        embeddings = np.array(response['embedding'])
+        
+        # Save to cache
+        if not hasattr(get_embeddings, "_cache"):
+            get_embeddings._cache = {}
+        get_embeddings._cache[content_signature] = embeddings
+        
+        return embeddings
+    except Exception as e:
+        print(f"Error getting embeddings: {e}")
+        return np.array([]).reshape(0, EMBEDDING_DIM)
+
+def build_faiss_index(embeddings: npt.NDArray, cache_key: str = None):
+    """Builds an optimized FAISS index from embeddings with HNSW for faster search."""
     if cache_key and cache_key in _index_cache:
         return _index_cache[cache_key]
-    
+
+    if embeddings.shape[0] == 0:
+        print("Cannot build index from empty embeddings.")
+        return None
+
     dim = embeddings.shape[1]
-    index = faiss.IndexFlatL2(dim)
-    index.add(np.array(embeddings))
-    
+    # HNSW offers significant speed improvements over brute-force search
+    index = faiss.IndexHNSWFlat(dim, 32)  # 32 is the HNSW constant (can be tuned)
+    index.add(embeddings)
+
     if cache_key:
         _index_cache[cache_key] = index
-    
+
     return index
 
-# Search top-k chunks with optimized search
-def search_similar_chunks(question, chunks, index, k=3):
-    model = get_model()
-    q_embed = model.encode([question], show_progress_bar=False)
-    D, I = index.search(q_embed, k)
-    return [chunks[i] for i in I[0]]
+def search_similar_chunks(question: str, chunks: List[str], index: faiss.Index, k: int = 5) -> List[str]:
+    """Search for chunks similar to the question using Gemini embeddings."""
+    if not index:
+        print("Search failed: FAISS index is not valid.")
+        return chunks[:k]
+        
+    try:
+        response = genai.embed_content(
+            model=EMBEDDING_MODEL,
+            content=question,
+            task_type="retrieval_query"
+        )
+        q_embed = np.array([response['embedding']])
+        distances, indices = index.search(q_embed, k)
+        return [chunks[i] for i in indices[0]]
+    except Exception as e:
+        print(f"Error in similarity search: {e}")
+        return chunks[:k]
+    

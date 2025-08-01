@@ -3,6 +3,14 @@ import docx
 import email
 import re
 from typing import Tuple, List
+import nltk
+from nltk.tokenize import sent_tokenize
+
+# Initialize NLTK data at module level
+try:
+    nltk.download('punkt', quiet=True)
+except Exception as e:
+    print(f"Warning: NLTK punkt download failed: {e}")
 
 def parse_document_from_bytes(file_bytes: bytes, filename: str) -> Tuple[str, List[str]]:
     filename = filename.lower()
@@ -45,47 +53,62 @@ def parse_email(file_bytes: bytes) -> Tuple[str, List[str]]:
     return text, chunks
 
 def create_semantic_chunks(text: str, max_chunk_size: int = 800, overlap: int = 150) -> List[str]:
-    """
-    Create semantic chunks based on sentences and paragraphs rather than fixed character counts
-    Optimized for large files while maintaining performance
-    """
-    # Split into sentences first
-    sentences = re.split(r'[.!?]+', text)
-    chunks = []
-    current_chunk = ""
+    """Enhanced semantic chunking with fallback tokenization"""
+    # First split into paragraphs
+    paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
     
-    for sentence in sentences:
+    # Initialize all_sentences list
+    all_sentences = []
+    
+    # Try NLTK tokenization first, fallback to simple regex if it fails
+    for para in paragraphs:
+        try:
+            sentences = sent_tokenize(para)
+        except LookupError:
+            # Fallback to simple regex-based sentence splitting
+            sentences = [s.strip() for s in re.split(r'[.!?]+', para) if s.strip()]
+        except Exception as e:
+            print(f"Warning: Sentence tokenization failed: {e}")
+            sentences = [para]  # Use whole paragraph as one sentence
+        
+        all_sentences.extend(sentences)
+
+    chunks = []
+    current_chunk = []
+    current_size = 0
+    
+    for sentence in all_sentences:
         sentence = sentence.strip()
-        if not sentence or len(sentence) < 5:  # Allow shorter sentences for large files
+        if not sentence:
             continue
             
-        # If adding this sentence would exceed max size, save current chunk and start new one
-        if len(current_chunk) + len(sentence) > max_chunk_size and current_chunk:
-            chunks.append(current_chunk.strip())
-            # Start new chunk with overlap from previous chunk
-            words = current_chunk.split()
-            if len(words) > 8:  # Balanced overlap
-                overlap_words = words[-8:]  # Last 8 words
-                current_chunk = " ".join(overlap_words) + " " + sentence
-            else:
-                current_chunk = sentence
-        else:
-            current_chunk += " " + sentence if current_chunk else sentence
+        sentence_size = len(sentence)
+        
+        # Check if adding this sentence would exceed max size
+        if current_size + sentence_size > max_chunk_size and current_chunk:
+            # Join current chunk and add to chunks
+            chunk_text = ' '.join(current_chunk)
+            if len(chunk_text) >= 50:  # Minimum chunk size
+                chunks.append(chunk_text)
+            
+            # Start new chunk with overlap
+            overlap_size = 0
+            new_chunk = []
+            for prev_sent in reversed(current_chunk):
+                if overlap_size + len(prev_sent) <= overlap:
+                    new_chunk.insert(0, prev_sent)
+                    overlap_size += len(prev_sent)
+                else:
+                    break
+            
+            current_chunk = new_chunk
+            current_size = sum(len(s) for s in current_chunk)
+        
+        current_chunk.append(sentence)
+        current_size += sentence_size
     
-    # Add the last chunk if it exists
-    if current_chunk.strip():
-        chunks.append(current_chunk.strip())
+    # Add the last chunk
+    if current_chunk:
+        chunks.append(' '.join(current_chunk))
     
-    # Filter out very short chunks but allow more chunks for large files
-    chunks = [chunk for chunk in chunks if len(chunk) > 20]
-    
-    # Adaptive chunk limit based on text size
-    text_size = len(text)
-    if text_size > 100000:  # Large file (>100KB)
-        max_chunks = 150
-    elif text_size > 50000:  # Medium file (50-100KB)
-        max_chunks = 100
-    else:  # Small file (<50KB)
-        max_chunks = 75
-    
-    return chunks[:max_chunks]
+    return chunks
